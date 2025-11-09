@@ -168,6 +168,11 @@
             border-bottom: none;
         }
 
+        .user-list li.speaking {
+            background: #fff3cd;
+            font-weight: bold;
+        }
+
         .instructions {
             background: #fff3cd;
             padding: 15px;
@@ -180,6 +185,17 @@
         .instructions strong {
             display: block;
             margin-bottom: 5px;
+        }
+
+        .btn-disconnect {
+            background: #e74c3c;
+            color: white;
+            margin-top: 10px;
+            display: none;
+        }
+
+        .btn-disconnect:hover {
+            background: #c0392b;
         }
 
         @media (max-width: 480px) {
@@ -196,7 +212,7 @@
 <body>
     <div class="container">
         <h1>📻 Walkie Talkie</h1>
-        <p class="subtitle">Comunicación en tiempo real</p>
+        <p class="subtitle">Comunicación en tiempo real con Agora</p>
 
         <div class="status disconnected" id="status">
             Desconectado
@@ -205,14 +221,15 @@
         <div class="instructions">
             <strong>Cómo usar:</strong>
             1. Ingresa tu nombre<br>
-            2. Crea o únete a un canal<br>
-            3. Mantén presionado el botón rojo para hablar<br>
-            4. Suelta para escuchar
+            2. Ingresa el nombre del canal (todos deben usar el mismo)<br>
+            3. Click en "Conectar al Canal"<br>
+            4. Mantén presionado el botón rojo para hablar<br>
+            5. Suelta para escuchar
         </div>
 
         <div class="channel-setup" id="setup">
             <input type="text" id="username" placeholder="Tu nombre" maxlength="20">
-            <input type="text" id="channelName" placeholder="Nombre del canal" maxlength="30">
+            <input type="text" id="channelName" placeholder="Nombre del canal (ej: familia)" maxlength="30">
             <button class="btn-connect" id="connectBtn">Conectar al Canal</button>
         </div>
 
@@ -220,33 +237,70 @@
             MANTÉN<br>PRESIONADO<br>PARA HABLAR
         </button>
 
+        <button class="btn-disconnect" id="disconnectBtn">Desconectar</button>
+
         <div class="connected-users" id="usersSection">
-            <h3>👥 Usuarios conectados:</h3>
+            <h3>👥 Usuarios en el canal:</h3>
             <ul class="user-list" id="userList"></ul>
         </div>
     </div>
 
+    <!-- Agora RTC SDK -->
+    <script src="https://download.agora.io/sdk/release/AgoraRTC_N-4.19.0.js"></script>
+
     <script>
+        // Configuración de Agora
+        const APP_ID = 'a44f5ea1740d4a54b0ba7d17e95d7f63';
+        
         // Variables globales
-        let localStream = null;
-        let peerConnections = {};
+        let client = null;
+        let localAudioTrack = null;
         let isTransmitting = false;
         let username = '';
         let channelName = '';
-        let audioContext = null;
-        let connectedUsers = new Set();
+        let remoteUsers = {};
 
         // Elementos DOM
         const statusEl = document.getElementById('status');
         const setupEl = document.getElementById('setup');
         const pttBtn = document.getElementById('pttBtn');
         const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
         const usernameInput = document.getElementById('username');
         const channelInput = document.getElementById('channelName');
         const usersSection = document.getElementById('usersSection');
         const userList = document.getElementById('userList');
 
-        // Simulación de conexión (En producción usarías WebSocket/WebRTC con servidor)
+        // Inicializar cliente de Agora
+        async function initAgora() {
+            client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+
+            // Eventos de usuario remoto
+            client.on("user-published", async (user, mediaType) => {
+                await client.subscribe(user, mediaType);
+                
+                if (mediaType === "audio") {
+                    const remoteAudioTrack = user.audioTrack;
+                    remoteAudioTrack.play();
+                    remoteUsers[user.uid] = user;
+                    updateUserList();
+                }
+            });
+
+            client.on("user-unpublished", (user, mediaType) => {
+                if (mediaType === "audio") {
+                    delete remoteUsers[user.uid];
+                    updateUserList();
+                }
+            });
+
+            client.on("user-left", (user) => {
+                delete remoteUsers[user.uid];
+                updateUserList();
+            });
+        }
+
+        // Conectar al canal
         connectBtn.addEventListener('click', async () => {
             username = usernameInput.value.trim();
             channelName = channelInput.value.trim();
@@ -257,36 +311,45 @@
             }
 
             try {
-                // Solicitar permiso de micrófono
-                localStream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    } 
+                connectBtn.disabled = true;
+                connectBtn.textContent = 'Conectando...';
+
+                // Inicializar Agora
+                await initAgora();
+
+                // Crear pista de audio local
+                localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
+                    encoderConfig: "speech_standard"
                 });
+
+                // Unirse al canal
+                const uid = await client.join(APP_ID, channelName, null, null);
+
+                // Mutear el audio por defecto (solo transmitir cuando se presione PTT)
+                localAudioTrack.setEnabled(false);
+
+                // Publicar el audio
+                await client.publish([localAudioTrack]);
 
                 // Cambiar UI
                 setupEl.style.display = 'none';
                 pttBtn.style.display = 'block';
+                disconnectBtn.style.display = 'block';
                 usersSection.style.display = 'block';
-                updateStatus('connected', `Conectado al canal: ${channelName}`);
+                updateStatus('connected', `✅ Conectado al canal: ${channelName}`);
 
                 // Agregar usuario a la lista
                 addUser(username + ' (tú)');
-                
-                // Simular otros usuarios (en producción esto vendría del servidor)
-                setTimeout(() => addUser('Usuario Demo'), 1000);
 
             } catch (error) {
-                alert('Error al acceder al micrófono. Asegúrate de dar permisos.');
-                console.error(error);
+                console.error('Error al conectar:', error);
+                alert('Error al conectar. Asegúrate de dar permisos al micrófono.');
+                connectBtn.disabled = false;
+                connectBtn.textContent = 'Conectar al Canal';
             }
         });
 
         // Botón PTT (Push To Talk)
-        let touchStartTime = 0;
-
         pttBtn.addEventListener('mousedown', startTransmission);
         pttBtn.addEventListener('mouseup', stopTransmission);
         pttBtn.addEventListener('touchstart', (e) => {
@@ -298,30 +361,64 @@
             stopTransmission();
         });
 
-        function startTransmission() {
-            if (!localStream || isTransmitting) return;
+        async function startTransmission() {
+            if (!localAudioTrack || isTransmitting) return;
             
             isTransmitting = true;
             pttBtn.classList.add('active');
             updateStatus('talking', '🎤 Transmitiendo...');
             
-            // Aquí iría la lógica de transmisión real con WebRTC
-            // Por ahora solo simula la transmisión
+            // Activar el micrófono
+            await localAudioTrack.setEnabled(true);
             
-            // Reproducir sonido de "beep" al iniciar
+            // Marcar que estás hablando
+            markUserSpeaking(username + ' (tú)', true);
+            
+            // Reproducir beep
             playBeep(800);
         }
 
-        function stopTransmission() {
+        async function stopTransmission() {
             if (!isTransmitting) return;
             
             isTransmitting = false;
             pttBtn.classList.remove('active');
-            updateStatus('connected', `Conectado al canal: ${channelName}`);
+            updateStatus('connected', `✅ Conectado al canal: ${channelName}`);
             
-            // Reproducir sonido de "beep" al terminar
+            // Mutear el micrófono
+            if (localAudioTrack) {
+                await localAudioTrack.setEnabled(false);
+            }
+            
+            // Quitar marca de hablando
+            markUserSpeaking(username + ' (tú)', false);
+            
+            // Reproducir beep
             playBeep(600);
         }
+
+        // Desconectar
+        disconnectBtn.addEventListener('click', async () => {
+            if (localAudioTrack) {
+                localAudioTrack.stop();
+                localAudioTrack.close();
+            }
+            
+            if (client) {
+                await client.leave();
+            }
+
+            // Resetear UI
+            setupEl.style.display = 'block';
+            pttBtn.style.display = 'none';
+            disconnectBtn.style.display = 'none';
+            usersSection.style.display = 'none';
+            connectBtn.disabled = false;
+            connectBtn.textContent = 'Conectar al Canal';
+            updateStatus('disconnected', 'Desconectado');
+            userList.innerHTML = '';
+            remoteUsers = {};
+        });
 
         function updateStatus(state, message) {
             statusEl.className = `status ${state}`;
@@ -329,26 +426,32 @@
         }
 
         function addUser(name) {
-            if (connectedUsers.has(name)) return;
-            
-            connectedUsers.add(name);
             const li = document.createElement('li');
             li.textContent = name;
-            li.id = `user-${name}`;
+            li.id = `user-${name.replace(/\s/g, '-')}`;
             userList.appendChild(li);
         }
 
-        function removeUser(name) {
-            connectedUsers.delete(name);
-            const userEl = document.getElementById(`user-${name}`);
-            if (userEl) userEl.remove();
+        function updateUserList() {
+            // Actualizar contador de usuarios remotos
+            const remoteCount = Object.keys(remoteUsers).length;
+            // Podrías agregar lógica adicional aquí para mostrar nombres de usuarios
+        }
+
+        function markUserSpeaking(name, isSpeaking) {
+            const userId = `user-${name.replace(/\s/g, '-')}`;
+            const userEl = document.getElementById(userId);
+            if (userEl) {
+                if (isSpeaking) {
+                    userEl.classList.add('speaking');
+                } else {
+                    userEl.classList.remove('speaking');
+                }
+            }
         }
 
         function playBeep(frequency) {
-            if (!audioContext) {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const oscillator = audioContext.createOscillator();
             const gainNode = audioContext.createGain();
             
@@ -365,7 +468,7 @@
             oscillator.stop(audioContext.currentTime + 0.1);
         }
 
-        // Prevenir zoom en dispositivos móviles al hacer doble tap
+        // Prevenir zoom en móviles
         let lastTouchEnd = 0;
         document.addEventListener('touchend', (e) => {
             const now = Date.now();
@@ -374,13 +477,6 @@
             }
             lastTouchEnd = now;
         }, false);
-
-        // Limpiar al cerrar
-        window.addEventListener('beforeunload', () => {
-            if (localStream) {
-                localStream.getTracks().forEach(track => track.stop());
-            }
-        });
     </script>
 </body>
 </html>
